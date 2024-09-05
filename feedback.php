@@ -1,73 +1,157 @@
+
 <?php
+session_start(); // Start the session
+
 $host = 'localhost';
 $dbname = 'feedback_system';
-$username = 'your_username';
-$password = 'your_password';
+$username = 'admin';
+$password = 'admin123';
 
 // Create connection
-$conn = mysqli_connect('localhost', 'admin', 'admin123', 'feedback');
-
+$conn = mysqli_connect($host, $username, $password, 'feedback');
 // Check connection
-if ($conn->connect_error) {
-    die("Connection failed: " . $conn->connect_error);
+if (!$conn) {
+    die("Connection failed: " . mysqli_connect_error());
 }
 
 // Subject and Feedback Question List
 $subjects = [
-    1 => ['Mathematics', 'Physics', 'Chemistry', 'English', 'History'],
-    2 => ['Biology', 'Geography', 'Economics', 'Computer Science', 'Philosophy'],
-    3 => ['Psychology', 'Sociology', 'Political Science', 'Statistics', 'Business'],
-    4 => ['Engineering', 'Medicine', 'Law', 'Art', 'Music'],
-    5 => ['Advanced Mathematics', 'Quantum Physics', 'Organic Chemistry', 'Creative Writing', 'World History'],
+    1 => ['Mathematics I', 'Physics', 'C Programming', 'Electricals', 'Mechanical'],
+    2 => ['Mathematics II', 'Electronics', 'Engineering Chemistry', 'Python Programming', 'English'],
+    3 => ['Mathematics III', 'Data Structures', 'Operating Systems', 'Computer Organizations', 'Unix Shell Programming'],
+    4 => ['Mathematics IV', 'OOP Using JAVA', 'Data Communications', 'Design Analysis Using C', 'Professional Ethics'],
+    5 => ['Theory Of Computations', 'Database Management Systems', 'Artificial Intelligence', 'Research Methodology', 'Environmental Science'],
 ];
 
 $feedbackQuestions = [
     'Understanding of the subject',
     'Teaching effectiveness',
-    'Availability of resources',
-    'Clarity of the material',
-    'Overall satisfaction'
+    'Overall satisfaction',
+    '.',
+    '.',
+    '.',
+    '.',
+    '.',
+    '.',
+    '.'
 ];
 
-$studentName = '';
-$studentID = '';
-$selectedSemesters = [];
-$feedbackSubmitted = false;
+// Initialize session variables if not set
+if (!isset($_SESSION['studentName'])) {
+    $_SESSION['studentName'] = '';
+    $_SESSION['studentID'] = '';
+    $_SESSION['selectedSemesters'] = [];
+    $_SESSION['currentSemester'] = 0;
+    $_SESSION['currentSubjectIndex'] = 0;
+    $_SESSION['feedbackSubmitted'] = false;
+    $_SESSION['totalSubjects'] = 0;
+    $_SESSION['feedbackGiven'] = 0;
+    $_SESSION['subjectAverages'] = [];
+    $_SESSION['overallAverage'] = 0;
+}
+
+$studentName = $_SESSION['studentName'];
+$studentID = $_SESSION['studentID'];
+$selectedSemesters = $_SESSION['selectedSemesters'];
+$currentSemester = $_SESSION['currentSemester'];
+$currentSubjectIndex = $_SESSION['currentSubjectIndex'];
+$feedbackSubmitted = $_SESSION['feedbackSubmitted'];
+$totalSubjects = $_SESSION['totalSubjects'];
+$feedbackGiven = $_SESSION['feedbackGiven'];
+$subjectAverages = $_SESSION['subjectAverages'];
+$overallAverage = $_SESSION['overallAverage'];
 
 // Handle form submission
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$feedbackSubmitted) {
     if (isset($_POST['studentName']) && isset($_POST['studentID'])) {
         $studentName = $_POST['studentName'];
         $studentID = $_POST['studentID'];
+        $_SESSION['studentName'] = $studentName;
+        $_SESSION['studentID'] = $studentID;
     }
 
     if (isset($_POST['semesters'])) {
-        $selectedSemesters = array_map('intval', $_POST['semesters']);
+        $selectedSemesters = array_map('intval', (array)$_POST['semesters']);
+        $_SESSION['selectedSemesters'] = $selectedSemesters;
+        $currentSemester = reset($selectedSemesters);
+        $_SESSION['currentSemester'] = $currentSemester;
+
+        // Calculate total subjects
+        foreach ($selectedSemesters as $semester) {
+            $totalSubjects += count($subjects[$semester]);
+        }
+        $_SESSION['totalSubjects'] = $totalSubjects;
     }
 
+    // Handle feedback submission for a specific subject
     if (isset($_POST['feedback'])) {
-        foreach ($_POST['feedback'] as $semester => $subjectsFeedback) {
-            foreach ($subjectsFeedback as $subject => $questions) {
-                foreach ($questions as $question => $rating) {
-                    $stmt = $conn->prepare("INSERT INTO feedback (student_id, student_name, semester, subject, question, rating) VALUES (?, ?, ?, ?, ?, ?)");
-                    $stmt->bind_param("ssisii", $studentID, $studentName, $semester, $subject, $question, $rating);
-                    $stmt->execute();
-                }
-            }
+        $studentIDHash = hash('sha256', $studentID);
+        $studentNameHash = hash('sha256', $studentName);
+        $subject = $subjects[$currentSemester][$currentSubjectIndex];
+        foreach ($_POST['feedback'][$subject] as $question => $rating) {
+            $stmt = $conn->prepare("INSERT INTO feedback (student_id_hash, student_name_hash, semester, subject, question, rating) VALUES (?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param("ssisii", $studentIDHash, $studentNameHash, $currentSemester, $subject, $question, $rating);
+            $stmt->execute();
         }
         $stmt->close();
-        $feedbackSubmitted = true;
+        $feedbackGiven++;
+        $_SESSION['feedbackGiven'] = $feedbackGiven;
+
+        // Move to the next subject or the next semester
+        $currentSubjectIndex++;
+        if ($currentSubjectIndex >= count($subjects[$currentSemester])) {
+            $currentSubjectIndex = 0;
+            $currentSemester = next($selectedSemesters);
+        }
+        $_SESSION['currentSubjectIndex'] = $currentSubjectIndex;
+        $_SESSION['currentSemester'] = $currentSemester;
+
+        // If all semesters and subjects are completed
+        if ($currentSemester === false) {
+            $_SESSION['feedbackSubmitted'] = true;
+            $feedbackSubmitted = true;
+
+            // Calculate the average percentage for each subject and overall
+            $totalFeedback = 0;
+            $totalPossible = 0;
+
+            foreach ($selectedSemesters as $semester) {
+                foreach ($subjects[$semester] as $subject) {
+                    $subjectFeedback = $conn->prepare("SELECT SUM(rating) AS totalRating, COUNT(rating) AS totalResponses FROM feedback WHERE semester = ? AND subject = ?");
+                    $subjectFeedback->bind_param("is", $semester, $subject);
+                    $subjectFeedback->execute();
+                    $subjectFeedback->bind_result($totalRating, $totalResponses);
+                    $subjectFeedback->fetch();
+                    $subjectFeedback->close();
+
+                    $maxPossible = count($feedbackQuestions) * 5 * $totalResponses; // 5 possible ratings per question per response
+                    $subjectAverage = $totalResponses > 0 ? ($totalRating / $maxPossible) * 100 : 0;
+                    $subjectAverages[$semester][$subject] = round($subjectAverage, 2);
+
+                    $totalFeedback += $totalRating;
+                    $totalPossible += $maxPossible;
+                }
+            }
+
+            $overallAverage = $totalPossible > 0 ? ($totalFeedback / $totalPossible) * 100 : 0;
+            $_SESSION['overallAverage'] = round($overallAverage, 2);
+            $_SESSION['subjectAverages'] = $subjectAverages;
+        }
     }
+} elseif (isset($_GET['reset']) && $_GET['reset'] == 1) {
+    // Clear session to allow new feedback submission
+    session_unset();
+    session_destroy();
+    header("Location: " . $_SERVER['PHP_SELF']);
+    exit();
 }
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Student Feedback Form</title>
+    <title>Academic Insights Webpage</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -75,6 +159,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             margin: 0;
             padding: 20px;
             overflow-x: hidden;
+            animation: backgroundShift 8s ease infinite alternate;
+        }
+
+        @keyframes backgroundShift {
+            0% {
+                background-color: #f0fff0;
+            }
+            50% {
+                background-color: #ffe4e1;
+            }
+            100% {
+                background-color: #f0f8ff;
+            }
         }
 
         .container {
@@ -86,38 +183,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
             position: relative;
             overflow: hidden;
+            transition: transform 0.5s ease;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
         }
 
-        .container::before, .container::after {
-            content: '';
-            position: absolute;
-            width: 150px;
-            height: 150px;
-            border-radius: 50%;
-            z-index: -1;
-            animation: spin 10s linear infinite;
+        .container:hover {
+            transform: scale(1.02);
         }
 
-        .container::before {
-            top: -75px;
-            right: -75px;
-            background: radial-gradient(circle at center, #ff6b6b, #ff6348);
-        }
-
-        .container::after {
-            bottom: -75px;
-            left: -75px;
-            background: radial-gradient(circle at center, #4b7bec, #273c75);
-            animation-direction: reverse;
-        }
-
-        @keyframes spin {
-            from {
-                transform: rotate(0deg);
-            }
-            to {
-                transform: rotate(360deg);
-            }
+        .content {
+            flex: 1;
         }
 
         h1, h2, h3, h4 {
@@ -150,238 +227,193 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             animation: fadeInUp 0.8s ease;
         }
 
-        input[type="text"],
-        select {
+        input[type="text"], select, input[type="number"] {
             width: 100%;
-            padding: 12px;
+            padding: 10px;
             margin-bottom: 20px;
-            border-radius: 5px;
-            border: 1px solid #ccc;
+            border: 2px solid #dcdcdc;
+            border-radius: 10px;
             font-size: 1rem;
-            background-color: #e8f0fe;
-            transition: background-color 0.3s ease;
-            animation: fadeIn 1s ease;
+            color: #333;
+            animation: fadeInUp 0.8s ease;
         }
 
-        input[type="text"]:focus,
-        select:focus {
-            background-color: #dfe9ff;
-        }
-
-        input[type="checkbox"] {
-            margin-right: 10px;
-            transform: scale(1.3);
-            cursor: pointer;
-            animation: bounce 0.6s ease;
-        }
-
-        input[type="submit"] {
-            width: 100%;
-            background: linear-gradient(135deg, #6ab04c 0%, #badc58 100%);
-            color: #fff;
-            border: none;
-            padding: 15px;
-            border-radius: 5px;
+        button {
+            padding: 12px 20px;
             font-size: 1.2rem;
+            border: none;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #ff6b6b 0%, #ff6348 100%);
+            color: white;
             cursor: pointer;
-            transition: background-color 0.3s ease, transform 0.3s ease;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
-            animation: pulse 1.2s infinite;
+            transition: background 0.3s ease;
+            animation: fadeInUp 0.8s ease;
+            display: block;
+            margin: 0 auto;
         }
 
-        input[type="submit"]:hover {
-            background-color: #78e08f;
-            transform: translateY(-3px);
-        }
-
-        .feedback-question {
-            margin-bottom: 15px;
-            animation: fadeInUp 0.5s ease;
-        }
-
-        .feedback-question select {
-            width: auto;
-            display: inline-block;
+        button:hover {
+            background: linear-gradient(135deg, #ff5141 0%, #ff8a65 100%);
         }
 
         @keyframes fadeIn {
-            from {
+            0% {
                 opacity: 0;
+                transform: translateY(-20px);
             }
-            to {
+            100% {
                 opacity: 1;
+                transform: translateY(0);
             }
         }
 
         @keyframes fadeInDown {
-            from {
+            0% {
                 opacity: 0;
-                transform: translateY(-20px);
+                transform: translateY(-40px);
             }
-            to {
+            100% {
                 opacity: 1;
                 transform: translateY(0);
             }
         }
 
         @keyframes fadeInUp {
-            from {
+            0% {
                 opacity: 0;
-                transform: translateY(20px);
+                transform: translateY(40px);
             }
-            to {
+            100% {
                 opacity: 1;
                 transform: translateY(0);
             }
         }
 
-        @keyframes bounce {
-            0%, 20%, 50%, 80%, 100% {
-                transform: translateY(0);
-            }
-            40% {
-                transform: translateY(-10px);
-            }
-            60% {
-                transform: translateY(-5px);
-            }
+        .stats-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 40px 0;
+            animation: fadeInUp 0.9s ease;
         }
 
-        @keyframes pulse {
-            0% {
-                transform: scale(1);
-            }
-            50% {
-                transform: scale(1.05);
-            }
-            100% {
-                transform: scale(1);
-            }
-        }
-
-        .feedback-submitted {
-            text-align: center;
-            padding: 50px;
-            background: linear-gradient(135deg, #6ab04c 0%, #78e08f 100%);
-            color: #fff;
-            border-radius: 10px;
-            animation: bounceIn 0.6s ease;
-        }
-
-        .feedback-submitted h2 {
-            font-size: 2.5rem;
+        .stats-table th, .stats-table td {
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            text-align: left;
+            font-size: 1.1rem;
             animation: fadeIn 1s ease-in-out;
         }
 
-        @keyframes bounceIn {
-            from {
-                opacity: 0;
-                transform: scale(0.9);
-            }
-            to {
-                opacity: 1;
-                transform: scale(1);
-            }
+        .stats-table th {
+            background-color: #f4f4f4;
         }
 
-        @media (max-width: 768px) {
-            .container {
-                padding: 15px;
-            }
+        .reset-link {
+            text-decoration: none;
+            color: #ff5141;
+            font-weight: bold;
+            animation: fadeIn 1.2s ease;
+        }
 
-            h1 {
-                font-size: 2.2rem;
-            }
+        .reset-link:hover {
+            text-decoration: underline;
+        }
 
-            input[type="submit"] {
-                font-size: 1rem;
-                padding: 12px;
-            }
+        .progress-bar {
+            height: 25px;
+            background-color: #f4f4f4;
+            border-radius: 10px;
+            overflow: hidden;
+            animation: fadeInUp 0.8s ease;
+        }
 
-            .feedback-submitted h2 {
-                font-size: 2rem;
+        .progress-bar span {
+            display: block;
+            height: 100%;
+            background: linear-gradient(135deg, #ff6b6b 0%, #ff5141 100%);
+            animation: progress 2s ease-in-out;
+        }
+
+        @keyframes progress {
+            0% {
+                width: 0;
+            }
+            100% {
+                width: 100%;
             }
         }
     </style>
 </head>
-
 <body>
-    <div class="container">
-        <h1>Student Feedback Form</h1>
+<div class="container">
+    <div class="content">
+        <h1>Academic Insights Webpage</h1>
 
-        <!-- Step 1: Display Student Name and ID Form -->
-        <?php if (!$studentName && !$studentID) : ?>
-            <form method="POST">
-                <label for="studentName">Student Name:</label>
-                <input type="text" id="studentName" name="studentName" required>
-
-                <label for="studentID">Student ID:</label>
-                <input type="text" id="studentID" name="studentID" required>
-
-                <input type="submit" value="Next">
-            </form>
-        <?php endif; ?>
-
-        <!-- Step 2: Display Semester Selection -->
-        <?php if ($studentName && $studentID && empty($selectedSemesters) && !$feedbackSubmitted) : ?>
-            <h2>Welcome, <?php echo htmlspecialchars($studentName); ?> (ID: <?php echo htmlspecialchars($studentID); ?>)</h2>
-            <form method="POST">
-                <input type="hidden" name="studentName" value="<?php echo htmlspecialchars($studentName); ?>">
-                <input type="hidden" name="studentID" value="<?php echo htmlspecialchars($studentID); ?>">
-
-                <label>Select Semester(s) for Feedback:</label>
-                <?php for ($i = 1; $i <= 5; $i++) : ?>
-                    <label>
-                        <input type="checkbox" name="semesters[]" value="<?php echo $i; ?>"> Semester <?php echo $i; ?>
-                    </label>
-                <?php endfor; ?>
-
-                <input type="submit" value="Next">
-            </form>
-        <?php endif; ?>
-
-        <!-- Step 3: Display Feedback Form for Selected Semesters -->
-        <?php if (!empty($selectedSemesters) && !$feedbackSubmitted) : ?>
-            <h2>Provide Feedback for the Selected Semesters</h2>
-            <form method="POST">
-                <input type="hidden" name="studentName" value="<?php echo htmlspecialchars($studentName); ?>">
-                <input type="hidden" name="studentID" value="<?php echo htmlspecialchars($studentID); ?>">
-
-                <?php foreach ($selectedSemesters as $semester) : ?>
-                    <h3>Feedback for Semester <?php echo $semester; ?></h3>
-                    <?php foreach ($subjects[$semester] as $subject) : ?>
-                        <h4><?php echo $subject; ?></h4>
-                        <?php foreach ($feedbackQuestions as $question) : ?>
-                            <div class="feedback-question">
-                                <label for="question-<?php echo md5($semester . $subject . $question); ?>">
-                                    <?php echo $question; ?>
-                                </label>
-                                <select name="feedback[<?php echo $semester; ?>][<?php echo $subject; ?>][<?php echo $question; ?>]" id="question-<?php echo md5($semester . $subject . $question); ?>" required>
-                                    <?php for ($i = 0; $i <= 5; $i++) : ?>
-                                        <option value="<?php echo $i; ?>"><?php echo $i; ?></option>
-                                    <?php endfor; ?>
-                                </select>
-                            </div>
+        <?php if (!$feedbackSubmitted): ?>
+            <?php if (empty($studentName) || empty($studentID)): ?>
+                <form action="" method="POST">
+                    <label for="studentName">Student Name:</label>
+                    <input type="text" id="studentName" name="studentName" required>
+                    <label for="studentID">Student ID:</label>
+                    <input type="text" id="studentID" name="studentID" required>
+                    <button type="submit">Next</button>
+                
+            <?php elseif (empty($selectedSemesters)): ?>
+                <form action="" method="POST">
+                    <label for="semesters">Select Semester(s):</label>
+                    <select id="semesters" name="semesters[]" multiple required>
+                        <?php foreach ($subjects as $semester => $subjectList): ?>
+                            <option value="<?php echo $semester; ?>">Semester <?php echo $semester; ?></option>
+                        <?php endforeach; ?>
+                        </form>
+                    </select>
+                    <button type="submit">Next</button>
+                </form>
+            <?php else: ?>
+                <h2>Semester <?php echo $currentSemester; ?>: <?php echo $subjects[$currentSemester][$currentSubjectIndex]; ?></h2>
+                <form action="" method="POST">
+                    <input type="hidden" name="currentSemester" value="<?php echo $currentSemester; ?>">
+                    <input type="hidden" name="currentSubjectIndex" value="<?php echo $currentSubjectIndex; ?>">
+                    <?php foreach ($feedbackQuestions as $index => $question): ?>
+                        <label><?php echo htmlspecialchars($question); ?></label>
+                        <select name="feedback[<?php echo htmlspecialchars($subjects[$currentSemester][$currentSubjectIndex]); ?>][<?php echo $index; ?>]" required>
+                        <option value="">Select Rating</option>
+                            <option value="1">Very Poor</option>
+                            <option value="2">Poor</option>
+                            <option value="3">Average</option>
+                            <option value="4">Good</option>
+                            <option value="5">Excellent</option>
+                        </select>
+                    <?php endforeach; ?>
+                    <button type="submit">Submit Insights</button>
+                </form>
+            <?php endif; ?>
+        <?php else: ?>
+            <h2>Insights Summary</h2>
+            <table class="stats-table">
+                <thead>
+                    <tr>
+                        <th>Semester</th>
+                        <th>Subject</th>
+                        <th>Average Rating (%)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php foreach ($subjectAverages as $semester => $subjects): ?>
+                        <?php foreach ($subjects as $subject => $average): ?>
+                            <tr>
+                                <td><?php echo $semester; ?></td>
+                                <td><?php echo $subject; ?></td>
+                                <td><?php echo $average; ?>%</td>
+                            </tr>
                         <?php endforeach; ?>
                     <?php endforeach; ?>
-                <?php endforeach; ?>
-
-                <input type="submit" value="Submit Feedback">
-            </form>
-        <?php endif; ?>
-
-        <!-- Feedback Submission Confirmation -->
-        <?php if ($feedbackSubmitted) : ?>
-            <div class="feedback-submitted">
-                <h2>Thank you, <?php echo htmlspecialchars($studentName); ?>!</h2>
-                <p>Your feedback has been submitted successfully.</p>
-            </div>
+                </tbody>
+            </table>
+            <h3>Overall Average: <?php echo $overallAverage; ?>%</h3>
+            <a href="?reset=1" class="reset-link">Initiate New Insights</a>
         <?php endif; ?>
     </div>
+</div>
 </body>
-
 </html>
-
-<?php
-$conn->close();
-?>
